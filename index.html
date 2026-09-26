@@ -874,7 +874,7 @@ function renderShop(){
     let pips=""; for(let i=0;i<def.max;i++) pips+=i<lv?"●":"○";
     row.innerHTML='<div class="info"><b>'+T.upName[id]+'</b><div>'+T.upDesc[id]+'</div><div class="pips">'+pips+'</div></div>';
     const b=document.createElement("button"); b.className="buybtn";
-    b.textContent=maxed?T.maxed:(T.buy+" 💰"+cost);
+    b.textContent=maxed?T.maxed:(T.buy+" $"+cost);
     b.disabled=maxed||Game.tips<cost;
     b.onclick=(()=>{ const _id=id; return ()=>Game.buyUpgrade(_id); })();
     row.appendChild(b); ui.shopList.appendChild(row);
