@@ -158,7 +158,7 @@
   </div>
 
   <div id="toast"></div>
-  <div id="vstamp">v2</div>
+  <div id="vstamp">v3</div>
   <div id="fader"></div>
 </div>
 <script>
@@ -174,7 +174,7 @@
 <script>
 /* Portal: none (itch.io / standalone).
    Sin SDK: el juego corre con localStorage y sin anuncios. */
-/* DRONE RUSH BUILD v2 */
+/* DRONE RUSH BUILD v3 */
 </script>
 <script>
 "use strict";
@@ -207,6 +207,7 @@ en:{ play:"▶ PLAY", upgrades:"🛠 UPGRADES", paused:"⏸ PAUSED", resume:"▶
   upName:{battery:"🔋 Battery", magnet:"🧲 Magnet", shield:"🛡 Shield"},
   upDesc:{battery:"Longer turbo", magnet:"Attracts packages", shield:"Survive a crash"},
   buy:"BUY", maxed:"MAX", toastDeliv:t=>`DELIVERED +💰${t}!`, toastPack:"+1 📦",
+  toastPerfect:t=>`PERFECT +💰${t}!`,
   toastShield:"🛡 SHIELD SAVED YOU!", toastTurbo:"⚡ TURBO!", toastNoTips:"Not enough tips!",
   newBest:"🏆 NEW BEST!" },
 es:{ play:"▶ JUGAR", upgrades:"🛠 MEJORAS", paused:"⏸ PAUSA", resume:"▶ SEGUIR", restart:"↻ REINICIAR",
@@ -218,6 +219,7 @@ es:{ play:"▶ JUGAR", upgrades:"🛠 MEJORAS", paused:"⏸ PAUSA", resume:"▶ 
   upName:{battery:"🔋 Batería", magnet:"🧲 Imán", shield:"🛡 Escudo"},
   upDesc:{battery:"Turbo más largo", magnet:"Atrae paquetes", shield:"Sobrevive un choque"},
   buy:"COMPRAR", maxed:"MÁX", toastDeliv:t=>`¡ENTREGA +💰${t}!`, toastPack:"+1 📦",
+  toastPerfect:t=>`¡PERFECTO +💰${t}!`,
   toastShield:"¡🛡 EL ESCUDO TE SALVÓ!", toastTurbo:"⚡ ¡TURBO!", toastNoTips:"¡Te faltan propinas!",
   newBest:"🏆 ¡NUEVO RÉCORD!" }
 };
@@ -244,6 +246,8 @@ const Sfx = window.Sfx = {
   setMuted(m){
     this.muted = !!m;
     try{ if(this.ctx){ if(m) this.ctx.suspend(); else if(this.ctx.state==="suspended") this.ctx.resume(); } }catch(e){}
+    try{ if(window.Music && window.Music.mGain)
+      window.Music.mGain.gain.setTargetAtTime(m?0:0.5, this.ctx?this.ctx.currentTime:0, 0.03); }catch(e){}
     try{ ["btnMuteHud","btnMuteT"].forEach(id=>{ const b=$(id); if(b) b.textContent = this.muted?"🔇":"🔊"; }); }catch(e){}
   },
   tone(f0,f1,dur,type,vol){
@@ -268,12 +272,177 @@ const Sfx = window.Sfx = {
     }catch(e){}
   },
   click(){ this.tone(700,900,0.07,"square",0.06); },
-  collect(){ this.tone(880,1320,0.12,"sine",0.1); },
-  deliver(){ this.tone(523,523,0.12,"triangle",0.12); setTimeout(()=>this.tone(659,659,0.12,"triangle",0.12),90); setTimeout(()=>this.tone(784,1046,0.2,"triangle",0.12),180); },
-  crash(){ this.noise(0.35,0.25); this.tone(160,40,0.4,"sawtooth",0.15); },
-  turbo(){ this.tone(200,900,0.35,"sawtooth",0.08); },
+  /* pop por capas: transitorio de pitch descendente + click de ataque */
+  pop(f0,f1,dur,vol){
+    if(this.muted||!this.ensure()) return;
+    try{
+      const t=this.ctx.currentTime, o=this.ctx.createOscillator(), g=this.ctx.createGain();
+      o.type="sine"; o.frequency.setValueAtTime(f0,t);
+      o.frequency.exponentialRampToValueAtTime(Math.max(40,f1),t+dur);
+      g.gain.setValueAtTime(vol||0.16,t); g.gain.exponentialRampToValueAtTime(0.001,t+dur);
+      o.connect(g); g.connect(this.ctx.destination); o.start(t); o.stop(t+dur+0.02);
+      const len=Math.floor(this.ctx.sampleRate*0.03), buf=this.ctx.createBuffer(1,len,this.ctx.sampleRate),
+            d=buf.getChannelData(0);
+      for(let i=0;i<len;i++) d[i]=(Math.random()*2-1)*(1-i/len);
+      const n=this.ctx.createBufferSource(), ng=this.ctx.createGain();
+      n.buffer=buf; ng.gain.value=(vol||0.16)*0.5;
+      n.connect(ng); ng.connect(this.ctx.destination); n.start(t);
+    }catch(e){}
+  },
+  /* recoger paquete: pop + chime ascendente por capas */
+  collect(){
+    this.pop(520,980,0.09,0.15);
+    const base=1180;
+    [0,1].forEach(i=>setTimeout(()=>
+      this.tone(base*Math.pow(2,i*4/12), base*Math.pow(2,(i*4+3)/12), 0.14, "sine", 0.09), i*70));
+  },
+  /* entrega: fanfarria corta; el pitch sube con racha/distancia (semitonos) */
+  deliver(semis){
+    const s=clamp(semis||0,0,12), tr=m=>m*Math.pow(2,s/12);
+    [523.25,659.25,783.99,1046.5].forEach((f,i)=>setTimeout(()=>
+      this.tone(tr(f),tr(f), i===3?0.3:0.13, "triangle", 0.13), i*85));
+    setTimeout(()=>this.tone(tr(2093),tr(2637),0.35,"sine",0.05),340); // shimmer
+  },
+  /* turbo: whoosh de ruido con filtro barriendo + subida de sierra */
+  turbo(){
+    if(this.muted||!this.ensure()) return;
+    try{
+      const t=this.ctx.currentTime, dur=0.5,
+            len=Math.floor(this.ctx.sampleRate*dur), buf=this.ctx.createBuffer(1,len,this.ctx.sampleRate),
+            d=buf.getChannelData(0);
+      for(let i=0;i<len;i++) d[i]=Math.random()*2-1;
+      const n=this.ctx.createBufferSource(); n.buffer=buf;
+      const bp=this.ctx.createBiquadFilter(); bp.type="bandpass"; bp.Q.value=1.2;
+      bp.frequency.setValueAtTime(400,t); bp.frequency.exponentialRampToValueAtTime(4500,t+dur);
+      const g=this.ctx.createGain();
+      g.gain.setValueAtTime(0.001,t); g.gain.exponentialRampToValueAtTime(0.22,t+0.08);
+      g.gain.exponentialRampToValueAtTime(0.001,t+dur);
+      n.connect(bp); bp.connect(g); g.connect(this.ctx.destination); n.start(t); n.stop(t+dur);
+      this.tone(180,880,0.4,"sawtooth",0.06);
+    }catch(e){}
+  },
   upgrade(){ [523,659,784,1046].forEach((f,i)=>setTimeout(()=>this.tone(f,f,0.12,"triangle",0.1),i*80)); },
-  shieldHit(){ this.tone(300,600,0.25,"square",0.12); }
+  /* escudo: thump grave + shimmer metálico */
+  shieldHit(){
+    this.tone(130,38,0.45,"sine",0.28);
+    if(!this.muted&&this.ensure()){ try{
+      const t=this.ctx.currentTime;
+      [2637,3136,3520].forEach((f,i)=>{
+        const o=this.ctx.createOscillator(), g=this.ctx.createGain();
+        o.type="sine"; o.frequency.value=f;
+        g.gain.setValueAtTime(0.05/(i+1),t+i*0.05);
+        g.gain.exponentialRampToValueAtTime(0.001,t+0.6);
+        o.connect(g); g.connect(this.ctx.destination); o.start(t+i*0.05); o.stop(t+0.65);
+      });
+    }catch(e){} }
+  },
+  /* game over: impacto + barrido descendente */
+  crash(){
+    this.noise(0.35,0.25); this.tone(160,40,0.4,"sawtooth",0.15);
+    this.tone(720,55,0.9,"sawtooth",0.12);
+    setTimeout(()=>this.tone(360,50,0.7,"triangle",0.1),120);
+  }
+};
+
+/* ---------- Music: synthwave nocturno 100% generativo (WebAudio puro) ----------
+   Bajo pulsante + arpegio con eco + pads + kick suave. Arranca con el primer
+   gesto del usuario, respeta el mute de Sfx y se pausa al ocultar la pestaña. */
+const Music = window.Music = {
+  started:false, timer:null, step:0, nextT:0, bpm:96, mGain:null, echo:null,
+  // Am - F - C - G (MIDI): progresión nocturna en La menor
+  chords:[[57,60,64],[53,57,60],[48,52,55],[55,59,62]],
+  midi(m){ return 440*Math.pow(2,(m-69)/12); },
+  init(){
+    if(this.started) return;
+    if(!Sfx.ensure()) return;
+    try{
+      const ctx=Sfx.ctx;
+      this.started=true;
+      this.mGain=ctx.createGain(); this.mGain.gain.value=Sfx.muted?0:0.5;
+      const comp=ctx.createDynamicsCompressor();
+      comp.threshold.value=-18; comp.ratio.value=6;
+      this.mGain.connect(comp); comp.connect(ctx.destination);
+      // bus de eco (delay punteado) para el arpegio
+      this.echo=ctx.createDelay(1.0);
+      this.echo.delayTime.value=(60/this.bpm)*0.75;
+      const fb=ctx.createGain(); fb.gain.value=0.36;
+      const wet=ctx.createGain(); wet.gain.value=0.5;
+      this.echo.connect(fb); fb.connect(this.echo);
+      this.echo.connect(wet); wet.connect(this.mGain);
+      if(Sfx.muted){ try{ctx.suspend();}catch(e){} }
+      else if(ctx.state==="suspended"){ try{ctx.resume();}catch(e){} }
+      this.nextT=ctx.currentTime+0.12;
+      this.timer=setInterval(()=>this.sched(),40);
+    }catch(e){ this.started=false; }
+  },
+  env(g,t,a,peak,dur){
+    g.gain.setValueAtTime(0.0001,t);
+    g.gain.exponentialRampToValueAtTime(peak,t+a);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+  },
+  bass(f,t,dur){
+    const ctx=Sfx.ctx, o=ctx.createOscillator(), fl=ctx.createBiquadFilter(), g=ctx.createGain();
+    o.type="sawtooth"; o.frequency.value=f;
+    fl.type="lowpass"; fl.frequency.value=520; fl.Q.value=2;
+    this.env(g,t,0.008,0.20,dur);
+    o.connect(fl); fl.connect(g); g.connect(this.mGain);
+    o.start(t); o.stop(t+dur+0.05);
+  },
+  kick(t){
+    const ctx=Sfx.ctx, o=ctx.createOscillator(), g=ctx.createGain();
+    o.type="sine";
+    o.frequency.setValueAtTime(130,t); o.frequency.exponentialRampToValueAtTime(42,t+0.11);
+    this.env(g,t,0.004,0.30,0.16);
+    o.connect(g); g.connect(this.mGain);
+    o.start(t); o.stop(t+0.2);
+  },
+  arp(f,t,dur){
+    const ctx=Sfx.ctx, o=ctx.createOscillator(), fl=ctx.createBiquadFilter(), g=ctx.createGain();
+    o.type="square"; o.frequency.value=f;
+    fl.type="lowpass"; fl.frequency.value=2300;
+    this.env(g,t,0.005,0.055,dur);
+    o.connect(fl); fl.connect(g);
+    g.connect(this.mGain); g.connect(this.echo);   // seco + eco
+    o.start(t); o.stop(t+dur+0.05);
+  },
+  pad(freqs,t,dur){
+    const ctx=Sfx.ctx;
+    for(const f of freqs) for(const det of [-4,4]){
+      const o=ctx.createOscillator(), fl=ctx.createBiquadFilter(), g=ctx.createGain();
+      o.type="sawtooth"; o.frequency.value=f; o.detune.value=det;
+      fl.type="lowpass"; fl.frequency.value=1050;
+      g.gain.setValueAtTime(0.0001,t);
+      g.gain.linearRampToValueAtTime(0.035,t+1.1);
+      g.gain.setValueAtTime(0.035,t+Math.max(1.1,dur-0.9));
+      g.gain.linearRampToValueAtTime(0.0001,t+dur);
+      o.connect(fl); fl.connect(g); g.connect(this.mGain);
+      o.start(t); o.stop(t+dur+0.05);
+    }
+  },
+  playStep(s,t,spb){
+    const bar=Math.floor(s/16)%4, st=s%16, ch=this.chords[bar], root=ch[0];
+    if(st%2===0) this.bass(this.midi(root-12), t, spb*1.8);        // bajo pulsante en 8vas
+    if(st%4===0) this.kick(t);                                     // kick suave en negras
+    const arpN=[ch[0],ch[1],ch[2],ch[0]+12,ch[2],ch[1]];
+    this.arp(this.midi(arpN[st%6]+12), t, spb*1.6);                 // arpegio 16vas con eco
+    if(st===0) this.pad(ch.map(m=>this.midi(m)), t, spb*16);       // pad por compás
+  },
+  sched(){
+    if(!this.started||!Sfx.ctx) return;
+    try{
+      const ctx=Sfx.ctx, spb=60/this.bpm/4;
+      while(this.nextT < ctx.currentTime+0.18){
+        this.playStep(this.step,this.nextT,spb);
+        this.nextT+=spb; this.step=(this.step+1)%64;
+      }
+    }catch(e){}
+  },
+  onHidden(){
+    try{ if(Sfx.ctx && Sfx.ctx.state==="running") Sfx.ctx.suspend(); }catch(e){}
+  },
+  onVisible(){
+    try{ if(Sfx.ctx && !Sfx.muted && Sfx.ctx.state==="suspended") Sfx.ctx.resume(); }catch(e){}
+  }
 };
 
 /* ---------- UI refs ---------- */
@@ -283,7 +452,19 @@ const ui = window.ui = {};
  "pause","pauseTitle","btnResume","btnRestartP","btnMenuP",
  "over","overTitle","oStats","btnContinue","btnDouble","btnRestartO","btnMenuO",
  "toast","vstamp","fader"].forEach(id=>{ ui[id]=$("c")&&$(id); });
-function show(el,on){ if(el) el.classList.toggle("hide",!on); }
+function show(el,on){
+  if(!el) return;
+  if(on){
+    el.classList.remove("hide");
+    // transición suave de entrada entre estados (título→juego→game over)
+    try{
+      const fade = el.classList && typeof el.classList.contains==="function" && el.classList.contains("screen");
+      if(fade) el.animate(
+        [{opacity:0,transform:"scale(.965)"},{opacity:1,transform:"scale(1)"}],
+        {duration:300,easing:"cubic-bezier(.2,.9,.3,1)"});
+    }catch(e){}
+  }else el.classList.add("hide");
+}
 let toastT=null;
 function toast(msg,ms){
   if(!ui.toast) return;
@@ -331,7 +512,7 @@ const Game = window.Game = {
     this.lane=1; this.height=1; this.tx=LANES[1]; this.ty=HEIGHTS[1];
     this.dist=0; this.speed=this.baseSpd(); this.packages=0; this.delivered=0; this.runTips=0;
     this.turboT=0; this.turboCD=0; this.invulnT=0; this.shields=this.up.shield;
-    this.reviveUsed=false; this.newBest=false;
+    this.reviveUsed=false; this.newBest=false; this.delivStreak=0;
     clearEntities();
     this.state="play"; this.sessionLive=true;
     show(ui.title,false); show(ui.shop,false); show(ui.over,false); show(ui.pause,false); show(ui.hud,true);
@@ -351,8 +532,10 @@ const Game = window.Game = {
     if(this.state!=="play" || this.invulnT>0) return;
     if(this.shields>0){
       this.shields--; this.invulnT=1.2; Sfx.shieldHit(); toast(T.toastShield);
+      shakeT=Math.max(shakeT,0.3); // sacudida sutil al absorber
       clearNearObstacles(); updateHUD(); return;
     }
+    this.delivStreak=0;
     this.state="over"; this.sessionLive=false; Sfx.crash(); crashBurst();
     try{ Portal.gameplayStop(); }catch(e){}
     try{ Portal.scoreChanged(this.runTips); }catch(e){}
@@ -393,7 +576,15 @@ const Game = window.Game = {
     const n=this.packages;
     const tip=n*(5+Math.floor(this.speed/12));
     this.packages=0; this.delivered+=n;
-    this.runTips+=tip; Sfx.deliver(); toast(T.toastDeliv(tip));
+    this.delivStreak=(this.delivStreak||0)+1;
+    this.runTips+=tip;
+    // fanfarria con pitch según racha y distancia
+    Sfx.deliver(Math.min(10,this.delivStreak+Math.floor(this.dist/600)));
+    if(n>=4){ // entrega perfecta: micro slow-mo + sacudida
+      slowmoT=0.38; shakeT=Math.max(shakeT,0.28); toast(T.toastPerfect(tip));
+    }else{
+      shakeT=Math.max(shakeT,0.14); toast(T.toastDeliv(tip));
+    }
     try{ Portal.scoreChanged(this.runTips); }catch(e){}
     updateHUD();
   },
@@ -422,7 +613,7 @@ const Game = window.Game = {
 };
 /* ================= THREE.JS WORLD ================= */
 let renderer=null, scene=null, camera=null, drone=null, droneParts=null;
-let groundTex=null, skyDome=null, blobShadow=null, shakeT=0;
+let groundTex=null, skyDome=null, blobShadow=null, shakeT=0, slowmoT=0;
 let keyLight=null, envMap=null, groundMat=null;
 let TEX=null; const facadeMats=[];
 let PR_MAX=2, PR_CUR=2;   // tope de pixelRatio (hasta 2x); adaptQuality lo baja si cae el fps
@@ -1059,7 +1250,10 @@ function adaptQuality(rawDt){
 function loop(t){
   requestAnimationFrame(loop);
   const rawDt=((t-lastT)/1000)||0.016;
-  const dt=Math.min(0.05,rawDt); lastT=t;
+  // micro slow-mo (jugo): escala el tiempo de juego sin tocar la física
+  const ts=slowmoT>0?0.38:1;
+  if(slowmoT>0) slowmoT-=rawDt;
+  const dt=Math.min(0.05,rawDt)*ts; lastT=t;
   adaptQuality(rawDt);
   if(Game.state==="play") update(dt,t/1000);
   if(droneParts){
@@ -1155,6 +1349,12 @@ function renderShop(){
     row.appendChild(b); ui.shopList.appendChild(row);
   }
 }
+/* la música arranca con el primer gesto del usuario (autoplay policy) */
+function firstGesture(){
+  try{ Music.init(); }catch(e){}
+  window.removeEventListener("pointerdown",firstGesture);
+  window.removeEventListener("keydown",firstGesture);
+}
 function bindUI(){
   ui.btnPlay.onclick=()=>Game.start();
   ui.btnShop.onclick=()=>{ Sfx.click(); renderShop(); show(ui.title,false); show(ui.shop,true); };
@@ -1170,8 +1370,13 @@ function bindUI(){
   ui.btnContinue.onclick=()=>{ Sfx.click(); try{ Portal.showRewarded(ok=>{ if(ok) Game.revive(); }); }catch(e){} };
   ui.btnDouble.onclick=()=>{ Sfx.click(); try{ Portal.showRewarded(ok=>{ if(ok) Game.doubleTips(); }); }catch(e){} };
   bindInput();
-  document.addEventListener("visibilitychange",()=>{ if(document.hidden) Game.autoPause(true); });
-  window.addEventListener("blur",()=>Game.autoPause(true));
+  window.addEventListener("pointerdown",firstGesture,{passive:true});
+  window.addEventListener("keydown",firstGesture);
+  document.addEventListener("visibilitychange",()=>{
+    if(document.hidden){ Game.autoPause(true); try{Music.onHidden();}catch(e){} }
+    else{ try{Music.onVisible();}catch(e){} }
+  });
+  window.addEventListener("blur",()=>{ Game.autoPause(true); try{Music.onHidden();}catch(e){} });
 }
 
 /* ---------- boot ---------- */
